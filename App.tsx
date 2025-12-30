@@ -1,11 +1,10 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   BookOpen, Languages, Send, Image as ImageIcon, Mic, Volume2, History, PlusCircle, Settings, X, 
   Loader2, ExternalLink, GraduationCap, Sparkles, BrainCircuit, FileText, CheckCircle2, MicOff, PlayCircle, UserCircle
 } from 'lucide-react';
 import { Language, Message, Subject, ChatSession, LiveState, QuizItem } from './types';
-import { getGeminiResponse, generateSpeech, decode, decodeAudioData, generateQuiz, encode } from './services/geminiService';
+import { getGeminiResponse, generateSpeech, decode, decodeAudioData, generateQuiz, encode, createBlob } from './services/geminiService';
 import { GoogleGenAI, Modality } from '@google/genai';
 import ProfileSettingsModal from './ProfileSettingsModal';
 
@@ -24,14 +23,17 @@ const App: React.FC = () => {
   const [attachments, setAttachments] = useState<string[]>([]);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [liveState, setLiveState] = useState<LiveState>({ isActive: false, userTranscript: '', aiTranscript: '', isConnecting: false });
+  const [isDictating, setIsDictating] = useState(false); // New state for dictation
   const [hasApiKey, setHasApiKey] = useState(false);
   const [showProfileSettings, setShowProfileSettings] = useState(false);
   const [userAvatar, setUserAvatar] = useState<string | null>(null); // New state for user avatar
+  const [microphoneError, setMicrophoneError] = useState<string | null>(null); // New state for microphone errors
   
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const liveSessionRef = useRef<any>(null);
+  const dictationSessionRef = useRef<any>(null); // Ref for dictation session
 
   const currentSession = sessions.find(s => s.id === currentSessionId);
 
@@ -49,7 +51,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [currentSession?.messages, isTyping, liveState.isActive]);
+  }, [currentSession?.messages, isTyping, liveState.isActive, isDictating]);
 
   const handleApiKeyError = () => {
     setHasApiKey(false);
@@ -150,6 +152,10 @@ const App: React.FC = () => {
       handleApiKeyError();
       return;
     }
+    // Ensure dictation is stopped if active
+    if (isDictating) stopDictation();
+
+    setMicrophoneError(null); // Clear previous microphone errors
     setLiveState(prev => ({ ...prev, isConnecting: true, isActive: true }));
     // Instantiate GoogleGenAI right before the API call to ensure the latest API key is used.
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
@@ -175,9 +181,8 @@ const App: React.FC = () => {
             const scriptProcessor = inputAudioContext.createScriptProcessor(4096, 1, 1);
             scriptProcessor.onaudioprocess = (e) => {
               const inputData = e.inputBuffer.getChannelData(0);
-              const int16 = new Int16Array(inputData.length);
-              for (let i = 0; i < inputData.length; i++) int16[i] = inputData[i] * 32768;
-              const pcmBlob = { data: encode(new Uint8Array(int16.buffer)), mimeType: 'audio/pcm;rate=16000' };
+              // Use the createBlob helper from services/geminiService
+              const pcmBlob = createBlob(inputData);
               sessionPromise.then(session => session.sendRealtimeInput({ media: pcmBlob }));
             };
             source.connect(scriptProcessor);
@@ -231,10 +236,22 @@ const App: React.FC = () => {
       console.error(e);
       if (e.message.includes("Requested entity was not found.")) {
          handleApiKeyError();
-      } else if (e.name === 'NotFoundError' || e.name === 'NotAllowedError' || e.name === 'NotReadableError') {
-        alert(language === 'bn' 
-          ? 'মাইক্রোফোন পাওয়া যায়নি বা অ্যাক্সেস করা যায়নি। লাইভ টিউটর ব্যবহারের জন্য একটি মাইক্রোফোন প্রয়োজন।' 
-          : 'Microphone not found or could not be accessed. A microphone is required to use the Live Tutor.');
+      } else if (e.name === 'NotFoundError') {
+        setMicrophoneError(language === 'bn' 
+          ? 'মাইক্রোফোন পাওয়া যায়নি। অনুগ্রহ করে একটি মাইক্রোফোন সংযুক্ত করুন অথবা আপনার সিস্টেম সেটিংসে এটি চালু আছে কিনা নিশ্চিত করুন।' 
+          : 'No microphone found. Please connect one or ensure it\'s enabled in your system settings.');
+      } else if (e.name === 'NotAllowedError') {
+        setMicrophoneError(language === 'bn' 
+          ? 'মাইক্রোফোন অ্যাক্সেস অস্বীকার করা হয়েছে। অনুগ্রহ করে আপনার ব্রাউজার সেটিংসে এই সাইটের জন্য মাইক্রোফোন অনুমতি দিন।' 
+          : 'Microphone access denied. Please enable microphone permissions for this site in your browser settings.');
+      } else if (e.name === 'NotReadableError') {
+        setMicrophoneError(language === 'bn' 
+          ? 'মাইক্রোফোন ব্যবহার করা যাচ্ছে না। অন্য কোনো অ্যাপ এটি ব্যবহার করছে, অথবা ড্রাইভার সংক্রান্ত সমস্যা থাকতে পারে।' 
+          : 'Microphone could not be accessed. Another application might be using it, or there\'s a driver issue.');
+      } else {
+        setMicrophoneError(language === 'bn' 
+          ? 'মাইক্রোফোন অ্যাক্সেস করতে একটি অজানা ত্রুটি ঘটেছে।' 
+          : 'An unknown error occurred while accessing the microphone.');
       }
       stopLiveTutor();
     }
@@ -250,10 +267,107 @@ const App: React.FC = () => {
       });
       if (liveSessionRef.current.stream) liveSessionRef.current.stream.getTracks().forEach((t: any) => t.stop());
       if (liveSessionRef.current.inputAudioContext) liveSessionRef.current.inputAudioContext.close();
+      // Ensure outputAudioContext is also closed if it was opened
       if (liveSessionRef.current.outputAudioContext) liveSessionRef.current.outputAudioContext.close();
     }
     setLiveState({ isActive: false, userTranscript: '', aiTranscript: '', isConnecting: false });
+    setMicrophoneError(null); // Clear microphone error on stop
   };
+
+  const startDictation = async () => {
+    if (!hasApiKey) {
+      handleApiKeyError();
+      return;
+    }
+    // Ensure Live Tutor is stopped if active
+    if (liveState.isActive) stopLiveTutor();
+
+    setMicrophoneError(null); // Clear previous microphone errors
+    setIsDictating(true);
+    let dictationAudioContext: AudioContext | null = null;
+    let stream: MediaStream | null = null;
+
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      dictationAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+      
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+      const sessionPromise = ai.live.connect({
+        model: 'gemini-2.5-flash-native-audio-preview-09-2025',
+        callbacks: {
+          onopen: () => {
+            if (!dictationAudioContext || !stream) return;
+            const source = dictationAudioContext.createMediaStreamSource(stream);
+            const scriptProcessor = dictationAudioContext.createScriptProcessor(4096, 1, 1);
+            scriptProcessor.onaudioprocess = (e) => {
+              const inputData = e.inputBuffer.getChannelData(0);
+              // Use the createBlob helper from services/geminiService
+              const pcmBlob = createBlob(inputData);
+              sessionPromise.then(session => session.sendRealtimeInput({ media: pcmBlob }));
+            };
+            source.connect(scriptProcessor);
+            scriptProcessor.connect(dictationAudioContext.destination);
+          },
+          onmessage: async (message) => {
+            if (message.serverContent?.inputTranscription) {
+              // Append transcription to current input field
+              setInput(prev => prev + message.serverContent!.inputTranscription!.text);
+            }
+            // No model audio output expected for dictation
+          },
+          onclose: () => stopDictation(),
+          onerror: (e) => {
+            console.error("Dictation API Error:", e);
+            handleApiKeyError();
+            stopDictation();
+          },
+        },
+        config: {
+          responseModalities: [], // No model audio response needed for dictation
+          inputAudioTranscription: {},
+          systemInstruction: `Transcribe spoken input into text. Language preference is ${language === 'bn' ? 'Bengali' : 'English'}.`
+        }
+      });
+      dictationSessionRef.current = { sessionPromise, stream, dictationAudioContext };
+    } catch (e: any) {
+      console.error(e);
+      if (e.message.includes("Requested entity was not found.")) {
+         handleApiKeyError();
+      } else if (e.name === 'NotFoundError') {
+        setMicrophoneError(language === 'bn' 
+          ? 'মাইক্রোফোন পাওয়া যায়নি। অনুগ্রহ করে একটি মাইক্রোফোন সংযুক্ত করুন অথবা আপনার সিস্টেম সেটিংসে এটি চালু আছে কিনা নিশ্চিত করুন।' 
+          : 'No microphone found. Please connect one or ensure it\'s enabled in your system settings.');
+      } else if (e.name === 'NotAllowedError') {
+        setMicrophoneError(language === 'bn' 
+          ? 'মাইক্রোফোন অ্যাক্সেস অস্বীকার করা হয়েছে। অনুগ্রহ করে আপনার ব্রাউজার সেটিংসে এই সাইটের জন্য মাইক্রোফোন অনুমতি দিন।' 
+          : 'Microphone access denied. Please enable microphone permissions for this site in your browser settings.');
+      } else if (e.name === 'NotReadableError') {
+        setMicrophoneError(language === 'bn' 
+          ? 'মাইক্রোফোন ব্যবহার করা যাচ্ছে না। অন্য কোনো অ্যাপ এটি ব্যবহার করছে, অথবা ড্রাইভার সংক্রান্ত সমস্যা থাকতে পারে।' 
+          : 'Microphone could not be accessed. Another application might be using it, or there\'s a driver issue.');
+      } else {
+        setMicrophoneError(language === 'bn' 
+          ? 'মাইক্রোফোন অ্যাক্সেস করতে একটি অজানা ত্রুটি ঘটেছে।' 
+          : 'An unknown error occurred while accessing the microphone.');
+      }
+      stopDictation();
+    }
+  };
+
+  const stopDictation = () => {
+    if (dictationSessionRef.current) {
+      dictationSessionRef.current.sessionPromise.then((session: any) => {
+        if (session && session.close) {
+          session.close();
+        }
+      });
+      if (dictationSessionRef.current.stream) dictationSessionRef.current.stream.getTracks().forEach((t: any) => t.stop());
+      if (dictationSessionRef.current.dictationAudioContext) dictationSessionRef.current.dictationAudioContext.close();
+    }
+    setIsDictating(false);
+    setMicrophoneError(null); // Clear microphone error on stop
+  };
+
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -313,6 +427,10 @@ const App: React.FC = () => {
     preferredLanguage: language === 'bn' ? 'পছন্দের ভাষা' : 'Preferred Language',
     languageEnglish: 'English',
     languageBengali: 'বাংলা',
+    startDictation: language === 'bn' ? 'ভয়েস ইনপুট শুরু করুন' : 'Start Voice Input',
+    stopDictation: language === 'bn' ? 'ভয়েস ইনপুট বন্ধ করুন' : 'Stop Voice Input',
+    dictating: language === 'bn' ? 'শুনছি...' : 'Listening...',
+    micErrorDismiss: language === 'bn' ? 'বাদ দিন' : 'Dismiss',
   };
 
   if (!hasApiKey) {
@@ -419,7 +537,11 @@ const App: React.FC = () => {
         {/* Header */}
         <header className="h-16 border-b border-slate-200 bg-white/80 backdrop-blur-lg flex items-center justify-between px-4 md:px-8 sticky top-0 z-20">
           <div className="flex items-center gap-4">
-            <button onClick={() => startLiveTutor()} className="flex items-center gap-2 px-4 py-2 bg-amber-50 text-amber-700 rounded-full text-sm font-bold border border-amber-100 hover:bg-amber-100 transition-all active:scale-95 shadow-sm">
+            <button 
+              onClick={() => startLiveTutor()} 
+              disabled={isDictating}
+              className={`flex items-center gap-2 px-4 py-2 bg-amber-50 text-amber-700 rounded-full text-sm font-bold border border-amber-100 transition-all active:scale-95 shadow-sm ${isDictating ? 'opacity-50 cursor-not-allowed' : 'hover:bg-amber-100'}`}
+            >
               <span className="relative flex h-2 w-2">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
@@ -612,6 +734,15 @@ const App: React.FC = () => {
         {/* Input Bar */}
         <div className="p-4 md:p-8 bg-white md:bg-transparent">
           <div className="max-w-5xl mx-auto flex flex-col gap-4">
+            {microphoneError && (
+              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-2xl relative shadow-sm mb-2 flex items-center justify-between">
+                <p className="text-sm font-medium">{microphoneError}</p>
+                <button onClick={() => setMicrophoneError(null)} className="ml-4 p-1.5 rounded-full hover:bg-red-100 transition-colors">
+                  <X size={16} />
+                </button>
+              </div>
+            )}
+
             {attachments.length > 0 && (
               <div className="flex flex-wrap gap-3 mb-1 p-3 bg-white border border-slate-200 rounded-2xl shadow-sm">
                 {attachments.map((img, idx) => (
@@ -634,19 +765,37 @@ const App: React.FC = () => {
                   placeholder={translations.placeholder}
                   className="w-full pl-6 pr-24 py-5 bg-white border-2 border-slate-200 rounded-3xl focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 focus:outline-none transition-all resize-none shadow-xl shadow-slate-200/50 max-h-48 min-h-[64px] font-medium"
                   rows={1}
+                  disabled={isDictating} // Disable typing while dictating
                 />
 
                 <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-1">
-                  <button onClick={() => fileInputRef.current?.click()} className="p-2.5 text-slate-400 hover:text-indigo-600 transition-colors rounded-xl hover:bg-slate-50">
+                  <button 
+                    onClick={() => fileInputRef.current?.click()} 
+                    className={`p-2.5 text-slate-400 hover:text-indigo-600 transition-colors rounded-xl hover:bg-slate-50 ${isDictating ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    disabled={isDictating}
+                  >
                     <ImageIcon size={22} />
                   </button>
                   <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" multiple accept="image/*" />
+
+                  <button 
+                    onClick={isDictating ? stopDictation : startDictation} 
+                    className={`p-2.5 rounded-xl transition-all ${
+                      isDictating 
+                        ? 'bg-red-100 text-red-600 hover:bg-red-200' 
+                        : 'text-slate-400 hover:text-indigo-600 hover:bg-slate-50'
+                    } ${liveState.isActive ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    disabled={liveState.isActive}
+                    title={isDictating ? translations.stopDictation : translations.startDictation}
+                  >
+                    {isDictating ? <Loader2 className="animate-spin" size={22} /> : <Mic size={22} />}
+                  </button>
                 </div>
               </div>
 
               <button 
                 onClick={() => handleSend()}
-                disabled={!input.trim() && attachments.length === 0}
+                disabled={(!input.trim() && attachments.length === 0) || isDictating} // Disable send while dictating
                 className="h-[64px] w-[64px] flex items-center justify-center bg-indigo-600 text-white rounded-3xl shadow-xl shadow-indigo-300 hover:bg-indigo-700 hover:scale-105 active:scale-95 disabled:opacity-50 disabled:shadow-none transition-all group"
               >
                 <Send size={24} className="group-hover:translate-x-1 group-hover:-translate-y-1 transition-transform" />

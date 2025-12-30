@@ -1,5 +1,4 @@
-
-import { GoogleGenAI, Type, GenerateContentResponse, Modality } from "@google/genai";
+import { GoogleGenAI, Type, GenerateContentResponse, Modality, Blob } from "@google/genai";
 import { Language, Message, Subject, QuizItem } from "../types";
 
 const API_KEY = process.env.API_KEY || "";
@@ -171,4 +170,17 @@ export async function decodeAudioData(
     }
   }
   return buffer;
+}
+
+// Helper function to create Blob for audio data, adhering to @google/genai's Blob interface.
+export function createBlob(data: Float32Array): Blob {
+  const l = data.length;
+  const int16 = new Int16Array(l);
+  for (let i = 0; i < l; i++) {
+    int16[i] = data[i] * 32768;
+  }
+  return {
+    data: encode(new Uint8Array(int16.buffer)),
+    mimeType: 'audio/pcm;rate=16000',
+  };
 }
