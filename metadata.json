@@ -1,0 +1,8 @@
+{
+  "name": "ShikkhaAI - Multilingual Study Tutor",
+  "description": "An advanced AI study assistant supporting Bengali and English. Features include homework help, note summarization, voice explanations, and visual problem solving.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
